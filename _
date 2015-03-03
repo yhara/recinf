@@ -1,0 +1,84 @@
+require 'pattern-match'
+
+module TypeInf
+  # Language
+  #
+  # - Anonymous function
+  #   [:fn, "x", (expr)]
+  # - Function call
+  #   [(fn), (arg)]
+  class Parser
+    def parse(program)
+      parse_exprs(program)
+    end
+
+    def parse_exprs(exprs)
+      exprs.map{|x| parse_expr(x)}
+    end
+
+    def parse_expr(expr)
+      match(expr) do
+        with(_[:fn, varname, expr]) do
+        end
+      end
+
+    end
+
+  end
+
+  # Ast (Abstract Syntax Tree)
+  #
+  # - Lambda abstraction
+  #   [:Abs, "x", (expr)]
+  # - Function application
+  #   [:App, (fn), (expr)]
+  # - Variable reference
+  #   [:VarRef, "x"]
+  # - Literal
+  #   [:Const, 1]
+  #   [:Const, "foo"]
+  #
+  class Ast
+    def initialize(sexp)
+      @sexp = sexp
+    end
+    attr_reader :sexp
+  end
+
+  class Inferer
+    def initialize(ast)
+      @ast = ast
+    end
+
+    def infer(sexp=@ast.sexp)
+      match(sexp) do
+        with(_[:Abs, var_name, body_expr]) do
+
+        end
+        with(_[:App, fun_expr, arg_expr])
+        with(_[:VarRef, var_name])
+
+        with(_[:Const, value]) do
+          case value
+          when Integer then :int
+          when String then :string
+          else
+            raise "unknown const type: #{value.inspect}"
+          end
+        end
+
+        with(_) do
+          raise "match failed: #{sexp.inspect}"
+        end
+
+      end
+    end
+  end
+
+end
+
+ast = TypeInf::Ast.new(
+  [:Abs, "x", [:Const, "a"]]
+)
+
+p TypeInf::Inferer.new(ast).infer

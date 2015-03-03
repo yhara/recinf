@@ -1,0 +1,18 @@
+
+instance Substitutable TyScm where
+  applySubst (Subst ss) orig@(TyPrim _) = orig
+  applySubst (Subst ss) orig@(TyVar i) =
+    case lookup i ss of
+      Just ts -> ts
+      Nothing -> orig
+  applySubst ss (TyFun ts1 ts2) =
+    TyFun (applySubst ss ts1) (applySubst ss ts2)
+
+instance Substitutable Subst where
+  applySubst subst (Subst []) = Subst []
+  applySubst subst (Subst (vid, tyscm):rest) =
+    Subst $ (vid, applySubst subst tyscm) : (map (applySubst subst) rest)
+    where 
+      substEntry [] = []
+      substEntry entries
+
