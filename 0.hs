@@ -32,20 +32,19 @@ occurs i (TyFun ts1 ts2) = occurs i ts1 || occurs i ts2
 -- そこで型変数を使って、「(a->a)->a」みたいに表す。
 -- 型スキーマ＝型変数を含んだ型
 
-type Subst = [(VId, TyScm)]
+type Subst = Map VId TyScm
 
 substTyScm :: Subst -> TyScm -> TyScm
 substTyScm ss orig@(TyPrim _) = orig
 substTyScm ss orig@(TyVar i) =
-  case Prelude.lookup i ss of
+  case Data.Map.lookup i ss of
     Just ts -> ts
     Nothing -> orig
 substTyScm ss (TyFun ts1 ts2) =
   TyFun (substTyScm ss ts1) (substTyScm ss ts2)
 
 substSubst :: Subst -> Subst -> Subst
-substSubst ss target = Prelude.map substEntry target
-  where substEntry (vid, tyscm) = (vid, substTyScm ss tyscm)
+substSubst ss target = Data.Map.map (substTyScm ss) target
 
 -- Unification
 
@@ -56,7 +55,7 @@ substTyEq :: Subst -> TyEq -> TyEq
 substTyEq ss (t1, t2) = (substTyScm ss t1, substTyScm ss t2)
 
 unify :: [TyEq] -> Maybe Subst
-unify tyeqs = unify' tyeqs []
+unify tyeqs = unify' tyeqs Data.Map.empty
   where
     unify' [] subst = Just subst
     unify' ((ts1, ts2):rest) subst =
@@ -66,9 +65,9 @@ unify tyeqs = unify' tyeqs []
         (TyVar id1, _) -> 
           if occurs id1 ts2
           then Nothing
-          else let ss = [(id1, ts2)] in
+          else let ss = Data.Map.singleton id1 ts2 in
                  unify' (Prelude.map (substTyEq ss) rest)
-                        (ss ++ (substSubst ss subst))
+                        (union ss (substSubst ss subst))
         (_, TyVar id2) ->
           unify' ((ts2, ts1):rest) subst
         (TyFun t1 t2, TyFun t3 t4) ->
