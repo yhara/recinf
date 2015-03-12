@@ -2,6 +2,10 @@
 import Test.Hspec
 import qualified Data.Map as M
 import Control.Monad (foldM)
+
+--import Debug.Trace (trace)
+trace str x = x
+
 --{-# LANGUAGE TypeSynonymInstances #-}
 -- 
 
@@ -29,6 +33,8 @@ occurs :: Int -> MonoTy -> Bool
 occurs i (TyPrim _) = False
 occurs i (TyVar ii) = (i == ii)
 occurs i (TyFun ts1 ts2) = occurs i ts1 || occurs i ts2
+occurs i (TyTuple _ tys) = any (occurs i) tys
+occurs i (TyVariant _ tys) = any (occurs i) tys
 
 -- p.165 なぜ型変数、型スキーマが必要か？
 -- 「与えられた式に対して、それを満たす型判定の集合を求める」には、
@@ -46,6 +52,10 @@ substMonoTy ss orig@(TyVar i) =
     Nothing -> orig
 substMonoTy ss (TyFun ts1 ts2) =
   TyFun (substMonoTy ss ts1) (substMonoTy ss ts2)
+substMonoTy ss (TyTuple n tys) =
+  TyTuple n $ map (substMonoTy ss) tys
+substMonoTy ss (TyVariant n tys) =
+  TyVariant n $ map (substMonoTy ss) tys
 
 substSubst :: Subst -> Subst -> Subst
 substSubst ss target = Prelude.map substEntry target
@@ -62,11 +72,16 @@ substTyEq ss (t1, t2) = (substMonoTy ss t1, substMonoTy ss t2)
 unify :: [TyEq] -> Maybe Subst
 unify tyeqs = unify' tyeqs []
   where
-    unify' [] subst = Just subst
-    unify' ((ts1, ts2):rest) subst =
+    unify' tyeqs subst =
+      let ret = unify'' tyeqs subst in
+        trace ("[unify "++(show $ (tyeqs, subst))++"\n  -> "++show ret) ret
+
+    unify'' [] subst = Just subst
+    unify'' ((ts1, ts2):rest) subst =
       case (ts1, ts2) of
-        (TyVar id1, TyVar id2) | id1 == id2 ->
-          unify' rest subst
+        (TyPrim (PBool _), TyPrim (PBool _)) -> unify' rest subst
+        (TyPrim (PInt _), TyPrim (PInt _))   -> unify' rest subst
+        (TyVar id1, TyVar id2) | id1 == id2  -> unify' rest subst
         (TyVar id1, _) -> 
           if occurs id1 ts2
           then Nothing
@@ -77,11 +92,18 @@ unify tyeqs = unify' tyeqs []
           unify' ((ts2, ts1):rest) subst
         (TyFun t1 t2, TyFun t3 t4) ->
           unify' ((t1, t3):(t2, t4):rest) subst
+
         (TyTuple n1 tys1, TyTuple n2 tys2) ->
           if (n1 /= n2) || (length tys1 /= length tys2)
           then Nothing
-          else unify' (zip tys1 tys2) subst
-        --(TyVariant n tys) ->
+          else unify' ((zip tys1 tys2)++rest) subst
+        (TyVariant n1 tys1, TyVariant n2 tys2) ->
+          if (n1 /= n2) || (length tys1 /= length tys2)
+          then Nothing
+          else unify' ((zip tys1 tys2)++rest) subst
+
+        _ ->
+          error ("unify: no match:" ++ show (ts1, ts2))
 
 -- Inference
 
@@ -113,16 +135,20 @@ extractTyEqs envs = concat [extractTyEq2 e1 e2 | e1 <- envs, e2 <- envs]
     extractTyEq2 e1 e2 = M.elems $ M.intersectionWith (,) e1 e2
 
 infer :: Int -> Expr -> Maybe (Int, TyEnv, MonoTy)
-infer i (ELit prim) =
+infer i expr =
+  let ret = infer' i expr in
+    trace (show expr ++ ":\n  -> " ++ show ret) ret
+
+infer' i (ELit prim) =
   Just (i, M.empty, TyPrim prim)
-infer i (EVar name) =
+infer' i (EVar name) =
   Just (i+1, M.singleton name (TyVar i), TyVar i)
-infer i (EAbs name expr) = do
+infer' i (EAbs name expr) = do
   (i', env, tret) <- infer i expr
   case M.lookup name env of
     Just targ -> Just (i', M.delete name env, TyFun targ tret)
     Nothing -> Just (i'+1, env, TyFun (TyVar i') tret)
-infer i (EApp fexpr aexpr) = do
+infer' i (EApp fexpr aexpr) = do
   (i',  e1, t1) <- infer i fexpr
   (i'', e2, t2) <- infer i' aexpr
   let tret = TyVar i''
@@ -131,27 +157,49 @@ infer i (EApp fexpr aexpr) = do
           M.union (substTyEnv ss e1) (substTyEnv ss e2),
           substMonoTy ss tret)
 
-infer i (ETuple exprs) = do
-  let l = length exprs
-  (i', envs, tys) <- foldM (\(ii, envs, tys) expr -> do
-                            (ii', env', ty') <- infer ii expr
-                            return (ii', env':envs, ty':tys))
-                          (i, [], [])
-                          exprs
+infer' i (ETuple exprs) = do
+  let nElms = length exprs
+  (i', envs, tys) <- inferExprs i exprs
   ss <- unify (extractTyEqs envs)
   let newenv = substTyEnv ss (M.unions envs)
-  let tuplety = TyTuple (length exprs) (map (substMonoTy ss) tys)
-  return (i+l, newenv, tuplety)
+  let tuplety = TyTuple nElms (map (substMonoTy ss) tys)
+  return (i', newenv, tuplety)
 
-infer i (ETupleRef tupleExpr idx nElms) = do
+infer' i (ETupleRef tupleExpr idx nElms) = do
   (i', env, ty1) <- infer i tupleExpr
   let tyvars = map TyVar [i'..i'+nElms-1]
   let ty2 = TyTuple nElms tyvars
   ss <- unify [(ty1, ty2)]
   return (i'+nElms, substTyEnv ss env, substMonoTy ss (tyvars !! idx))
 
-infer i (EVariant idx valExpr nElms) = undefined
-infer i (ECase valExpr caseExprs) = undefined
+infer' i (EVariant idx valExpr nElms) = do
+  (i', env, ty) <- infer i valExpr
+  let (tyvars1, tyvars2) = splitAt idx $ map TyVar [i'..i'+nElms-1-1]
+  let varity = TyVariant nElms (tyvars1 ++ [ty] ++ tyvars2)
+  return (i'+nElms, env, varity)
+
+infer' i (ECase valExpr caseExprs) = do
+  let nElms = length caseExprs
+  (i', env, valTy) <- infer i valExpr
+  let argTys = map TyVar [i'..i'+nElms-1]
+  let retTy = TyVar (i'+nElms)
+  (i'', envs, clauseTys) <- inferExprs (i'+nElms+1) caseExprs
+  let tyeqs = [(valTy, TyVariant nElms argTys)] ++
+              (map (\(clauseTy, argTy) -> (clauseTy, TyFun argTy retTy))
+                   (zip clauseTys argTys))
+  ss <- unify $ (extractTyEqs $ env:envs) ++ tyeqs
+  let newenv = substTyEnv ss (M.unions envs)
+  return $ trace ("tyeqs:" ++ show tyeqs ++
+                  "\nss: " ++ show ss)
+                 (i'', newenv, substMonoTy ss retTy)
+
+inferExprs :: Int -> [Expr] -> Maybe (Int, [TyEnv], [MonoTy])
+inferExprs i exprs =
+  foldM (\(ii, envs, tys) expr -> do
+          (ii', env', ty') <- infer ii expr
+          return (ii', env':envs, ty':tys))
+        (i, [], [])
+        exprs
 
 -- Main
 
@@ -197,20 +245,21 @@ main = hspec $ do
     it "tuple" $ do
       infer 0 (ETuple [ELit p99, ELit p99])
       `shouldBe`
-      Just (2, M.empty, (TyTuple 2 [TyPrim p99, TyPrim p99]))
+      Just (0, M.empty, (TyTuple 2 [TyPrim p99, TyPrim p99]))
 
     it "tupleRef" $ do
       infer 0 (ETupleRef (ETuple [ELit p98, ELit pTrue]) 1 2)
       `shouldBe`
-      Just (4, M.empty, TyPrim p98)
+      Just (2, M.empty, TyPrim p98)
 
     it "variant" $ do
       infer 0 (EVariant 1 (ELit p99) 2)
       `shouldBe`
-      Just (1, M.empty, TyVariant 2 [TyVar 0, TyPrim p99])
+      Just (2, M.empty, TyVariant 2 [TyVar 0, TyPrim p99])
 
---    it "case" $ do
---      infer 0 (ECase (EVariant 1 (ELit p99) 2)
---                [(EAbs "b" 
---      `shouldBe`
---      Just (1, M.empty, TyVariant 2 [TyVar 0, TyPrim p99])
+    it "case" $ do
+      infer 0 (ECase (EVariant 1 (ETuple [ELit p99, ELit pTrue]) 2)
+                     [(EAbs "a" $ ELit p98),
+                      (EAbs "b" $ ELit p98)])
+      `shouldBe`
+      Just (7, M.empty, TyPrim p98)
