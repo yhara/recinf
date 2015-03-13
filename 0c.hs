@@ -96,43 +96,39 @@ substTyEnv ss env = Data.Map.map (substTyScm ss) env
 extractTyEqs :: TyEnv -> TyEnv -> [TyEq]
 extractTyEqs e1 e2 = elems $ intersectionWith (,) e1 e2
 
-getId :: State Int Int
+getId :: StateT Int Maybe Int
 getId = do
   newId <- get
   put (newId+1)
   return newId
 
 infer :: Expr -> Maybe (Int, TyEnv, TyScm)
-infer expr =
-  let (ret, i) = runState (infer' expr) 0 in
-  case ret of
-    Just (env, ty) -> Just (i, env, ty)
-    Nothing -> Nothing
+infer expr = do
+  ((env, ty), i) <- runStateT (infer' expr) 0
+  return (i, env, ty)
 
-infer' :: Expr -> State Int (Maybe (TyEnv, TyScm))
+infer' :: Expr -> StateT Int Maybe (TyEnv, TyScm)
 infer' (ELit prim) = do
-  return $ Just (Data.Map.empty, TyPrim prim)
+  return (Data.Map.empty, TyPrim prim)
 infer' (EVar name) = do
   i <- getId
-  return $ Just (Data.Map.singleton name (TyVar i), TyVar i)
+  return (Data.Map.singleton name (TyVar i), TyVar i)
 infer' (EAbs name expr) = do
-  ret <- infer' expr
-  case ret of
-    Just (env, tret) ->
-      case Data.Map.lookup name env of
-        Just targ -> return $ Just (delete name env, TyFun targ tret)
-        Nothing -> do
-          i <- getId
-          return $ Just (env, TyFun (TyVar i) tret)
-    Nothing -> return $ Nothing
---infer i (EApp fexpr aexpr) = do
---  (i',  e1, t1) <- infer i fexpr
---  (i'', e2, t2) <- infer i' aexpr
---  let tret = TyVar i''
---  ss <- unify ((extractTyEqs e1 e2) ++ [(t1, TyFun t2 tret)])
---  return (i''+1,
---          union (substTyEnv ss e1) (substTyEnv ss e2),
---          substTyScm ss tret)
+  (env, tret) <- infer' expr
+  case Data.Map.lookup name env of
+    Just targ -> return (delete name env, TyFun targ tret)
+    Nothing -> do
+      i <- getId
+      return (env, TyFun (TyVar i) tret)
+infer' (EApp fexpr aexpr) = do
+  (e1, t1) <- infer' fexpr
+  (e2, t2) <- infer' aexpr
+  i <- getId
+  let tret = TyVar i
+  case unify ((extractTyEqs e1 e2) ++ [(t1, TyFun t2 tret)]) of
+    Just ss -> return (union (substTyEnv ss e1) (substTyEnv ss e2),
+                       substTyScm ss tret)
+    Nothing -> StateT $ \s -> Nothing
 
 -- Main
 
