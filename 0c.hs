@@ -96,11 +96,11 @@ substTyEnv ss env = Data.Map.map (substTyScm ss) env
 extractTyEqs :: TyEnv -> TyEnv -> [TyEq]
 extractTyEqs e1 e2 = elems $ intersectionWith (,) e1 e2
 
-getId :: StateT Int Maybe Int
-getId = do
+newTyVar :: StateT Int Maybe TyScm
+newTyVar = do
   newId <- get
   put (newId+1)
-  return newId
+  return (TyVar newId)
 
 infer :: Expr -> Maybe (Int, TyEnv, TyScm)
 infer expr = do
@@ -111,20 +111,19 @@ infer' :: Expr -> StateT Int Maybe (TyEnv, TyScm)
 infer' (ELit prim) = do
   return (Data.Map.empty, TyPrim prim)
 infer' (EVar name) = do
-  i <- getId
-  return (Data.Map.singleton name (TyVar i), TyVar i)
+  ty <- newTyVar
+  return (Data.Map.singleton name ty, ty)
 infer' (EAbs name expr) = do
   (env, tret) <- infer' expr
   case Data.Map.lookup name env of
     Just targ -> return (delete name env, TyFun targ tret)
     Nothing -> do
-      i <- getId
-      return (env, TyFun (TyVar i) tret)
+      ty <- newTyVar
+      return (env, TyFun ty tret)
 infer' (EApp fexpr aexpr) = do
   (e1, t1) <- infer' fexpr
   (e2, t2) <- infer' aexpr
-  i <- getId
-  let tret = TyVar i
+  tret <- newTyVar
   case unify ((extractTyEqs e1 e2) ++ [(t1, TyFun t2 tret)]) of
     Just ss -> return (union (substTyEnv ss e1) (substTyEnv ss e2),
                        substTyScm ss tret)
