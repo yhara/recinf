@@ -124,10 +124,9 @@ infer' (EApp fexpr aexpr) = do
   (e1, t1) <- infer' fexpr
   (e2, t2) <- infer' aexpr
   tret <- newTyVar
-  case unify ((extractTyEqs e1 e2) ++ [(t1, TyFun t2 tret)]) of
-    Just ss -> return (union (substTyEnv ss e1) (substTyEnv ss e2),
-                       substTyScm ss tret)
-    Nothing -> StateT $ \s -> Nothing
+  ss <- lift $ unify ((extractTyEqs e1 e2) ++ [(t1, TyFun t2 tret)])
+  return (union (substTyEnv ss e1) (substTyEnv ss e2),
+          substTyScm ss tret)
 
 -- Main
 
