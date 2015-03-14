@@ -7,6 +7,7 @@
 import Test.Hspec
 import Data.Map
 import Data.List
+import Control.Monad.State
 --{-# LANGUAGE TypeSynonymInstances #-}
 -- 
 
@@ -37,13 +38,22 @@ isMono (ids, ty) = Prelude.null ids
 
 -- 多相型の型変数を、freshなTyVarで置き換えたものを返す
 -- TyScmが単相のときはそれをそのまま返す
-instantiate :: Int -> TyScm -> (Int, MonoTy)
-instantiate i (ids, ty) =
-  let l = length ids in
-  let ss = fromList $
-             Prelude.map (\(id,newid) -> (id, TyVar newid))
-                         (zip ids [i..i+l-1]) in
-    (i+l, substMonoTy ss ty)
+--instantiate :: Int -> TyScm -> (Int, MonoTy)
+--instantiate i (ids, ty) =
+--  let l = length ids in
+--  let ss = fromList $
+--             Prelude.map (\(id,newid) -> (id, TyVar newid))
+--                         (zip ids [i..i+l-1]) in
+--    (i+l, substMonoTy ss ty)
+--
+instantiate :: TyScm -> StateT Int Maybe MonoTy
+instantiate (ids, ty) = do
+  ss <- foldM (\sum id -> do
+                ty <- newTyVar
+                return $ Data.Map.insert id ty sum)
+              empty
+              ids
+  return $ substMonoTy ss ty
 
 -- p.220のCls
 -- tsの型変数のうち、envに現れないものを多相にしたもの
@@ -159,35 +169,46 @@ substTyEnv ss env = Data.Map.map (substTyScm ss) env
 
 -- W
 
-inferW :: Int -> TyEnv -> Expr -> Maybe (Int, Subst, MonoTy)
+newTyVar :: StateT Int Maybe MonoTy
+newTyVar = do
+  newId <- get
+  put (newId+1)
+  return (TyVar newId)
+
+inferW :: TyEnv -> Expr -> Maybe (Int, Subst, MonoTy)
+inferW env expr = do
+  ((subst, ty), i) <- runStateT (inferW' env expr) 0
+  return (i, subst, ty)
+
+inferW' :: TyEnv -> Expr -> StateT Int Maybe (Subst, MonoTy)
 -- リテラル: その型を返す
-inferW i env (ELit prim) = do
-  return (i, empty, TyPrim prim)
+inferW' env (ELit prim) = do
+  return (empty, TyPrim prim)
 -- 変数参照: 変数をinstantiateしたものを返す(未定義の変数参照はNothing)
-inferW i env (EVar name) = do
-  ts <- Data.Map.lookup name env
-  let (i', ty) = instantiate i ts
-  return (i', empty, ty)
+inferW' env (EVar name) = do
+  ts <- lift $ Data.Map.lookup name env
+  ty <- instantiate ts
+  return (empty, ty)
 -- 関数抽象: 
-inferW i env (EAbs name bodyExpr) = do
-  let argTy = TyVar i
+inferW' env (EAbs name bodyExpr) = do
+  argTy <- newTyVar
   let innerEnv = Data.Map.insert name ([], argTy) env
-  (i', s1, retTy) <- inferW (i+1) innerEnv bodyExpr
-  return (i', s1, TyFun (substMonoTy s1 argTy) retTy)
+  (s1, retTy) <- inferW' innerEnv bodyExpr
+  return (s1, TyFun (substMonoTy s1 argTy) retTy)
 -- 関数適用: 
-inferW i env (EApp funExpr argExpr) = do
-  (i', s1, t1) <- inferW i env funExpr
-  (i'', s2, t2) <- inferW i' (substTyEnv s1 env) argExpr
-  let bodyTy = TyVar i''
-  s3 <- unify [((substMonoTy s2 t1), TyFun t2 bodyTy)]
-  return (i'', unions [s3, s2, s1], substMonoTy s3 bodyTy)
+inferW' env (EApp funExpr argExpr) = do
+  (s1, t1) <- inferW' env funExpr
+  (s2, t2) <- inferW' (substTyEnv s1 env) argExpr
+  bodyTy <- newTyVar
+  s3 <- lift $ unify [((substMonoTy s2 t1), TyFun t2 bodyTy)]
+  return (unions [s3, s2, s1], substMonoTy s3 bodyTy)
 -- let式: 
-inferW i env (ELet name varExpr bodyExpr) = do
-  (i', s1, t1) <- inferW i env varExpr
+inferW' env (ELet name varExpr bodyExpr) = do
+  (s1, t1) <- inferW' env varExpr
   let tyRo = typeCls t1 (substTyEnv s1 env)
   let newEnv = Data.Map.insert name tyRo (substTyEnv s1 env)
-  (i'', s2, t2) <- inferW i' newEnv bodyExpr
-  return (i'', Data.Map.union s1 s2, t2)
+  (s2, t2) <- inferW' newEnv bodyExpr
+  return (Data.Map.union s1 s2, t2)
 
 -- Main
 
@@ -231,16 +252,16 @@ main = hspec $ do
 
   describe "inferW" $ do
     it "primitive" $ do
-      inferW 0 empty (ELit $ PInt 99)
+      inferW empty (ELit $ PInt 99)
       `shouldBe`
       Just (0, empty, (TyPrim $ PInt 99))
 
 --    it "varref" $ do
---      inferW 0 empty (EVar "x")
+--      inferW empty (EVar "x")
 --      `shouldBe`
 --      Just (1, fromList [(0, TyVar 0)], (TyVar 0))
 
     it "abs" $ do
-      inferW 0 empty (EAbs "x" (ELit $ PInt 99))
+      inferW empty (EAbs "x" (ELit $ PInt 99))
       `shouldBe`
       Just (1, empty, (TyFun (TyVar 0) (TyPrim $ PInt 99)))
