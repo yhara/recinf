@@ -56,17 +56,17 @@ type Constraints = ([TyEq], Subst)
 substTyEq :: Subst -> TyEq -> TyEq
 substTyEq ss (t1, t2) = (substTyScm ss t1, substTyScm ss t2)
 
-unify :: [TyEq] -> Maybe Subst
+unify :: [TyEq] -> Either String Subst
 unify tyeqs = unify' tyeqs Data.Map.empty
   where
-    unify' [] subst = Just subst
+    unify' [] subst = Right subst
     unify' ((ts1, ts2):rest) subst =
       case (ts1, ts2) of
         (TyVar id1, TyVar id2) | id1 == id2 ->
           unify' rest subst
         (TyVar id1, _) -> 
           if occurs id1 ts2
-          then Nothing
+          then Left "error"
           else let ss = Data.Map.singleton id1 ts2 in
                  unify' (Prelude.map (substTyEq ss) rest)
                         (union ss (substSubst ss subst))
@@ -96,18 +96,18 @@ substTyEnv ss env = Data.Map.map (substTyScm ss) env
 extractTyEqs :: TyEnv -> TyEnv -> [TyEq]
 extractTyEqs e1 e2 = elems $ intersectionWith (,) e1 e2
 
-newTyVar :: StateT Int Maybe TyScm
+newTyVar :: StateT Int (Either String) TyScm
 newTyVar = do
   newId <- get
   put (newId+1)
   return (TyVar newId)
 
-infer :: Expr -> Maybe (Int, TyEnv, TyScm)
+infer :: Expr -> Either String (Int, TyEnv, TyScm)
 infer expr = do
   ((env, ty), i) <- runStateT (infer' expr) 0
   return (i, env, ty)
 
-infer' :: Expr -> StateT Int Maybe (TyEnv, TyScm)
+infer' :: Expr -> StateT Int (Either String) (TyEnv, TyScm)
 infer' (ELit prim) = do
   return (Data.Map.empty, TyPrim prim)
 infer' (EVar name) = do
@@ -152,14 +152,14 @@ main = hspec $ do
     it "primitive" $ do
       infer (ELit $ PInt 99)
       `shouldBe`
-      Just (0, empty, (TyPrim $ PInt 99))
+      Right (0, empty, (TyPrim $ PInt 99))
 
     it "varref" $ do
       infer (EVar "x")
       `shouldBe`
-      Just (1, fromList [("x", TyVar 0)], (TyVar 0))
+      Right (1, fromList [("x", TyVar 0)], (TyVar 0))
 
     it "abs" $ do
       infer (EAbs "x" (EVar "x"))
       `shouldBe`
-      Just (1, empty, (TyFun (TyVar 0) (TyVar 0)))
+      Right (1, empty, (TyFun (TyVar 0) (TyVar 0)))
