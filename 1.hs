@@ -109,6 +109,7 @@ substTyEq ss (t1, t2) = (substMonoTy ss t1, substMonoTy ss t2)
 unify :: [TyEq] -> Maybe Subst
 unify tyeqs = unify' tyeqs Data.Map.empty
   where
+    unify' :: [TyEq] -> Subst -> Maybe Subst
     unify' [] subst = Just subst
     unify' ((ts1, ts2):rest) subst =
       case (ts1, ts2) of
