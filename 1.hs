@@ -61,6 +61,7 @@ typeCls :: MonoTy -> TyEnv -> TyScm
 typeCls ty env =
   let envIds = concatMap freeTypeIds (elems env) in
   (varIds ty Data.List.\\ envIds, ty)
+  -- TODO: freshなものに付け替えないとまずそう
 
 --ftv :: TyScm -> [VId]
 --ftv (TyPrim _) = []

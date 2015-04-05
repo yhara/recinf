@@ -128,11 +128,16 @@ substSubst :: Subst -> Subst -> Subst
 substSubst ss2 ss1 = M.union (M.map (substMonoTy ss2) ss1)
                              ss2
 
+substVId :: Subst -> VId -> VId
+substVId ss id1 = case M.lookup id1 ss of
+                    Just (TyVar id2) -> id2
+                    _ -> error "error"
+
 mergeSubsts :: [Subst] -> Subst
 mergeSubsts sss = 
   let ret = foldr1 substSubst sss in
-    trace ("mergeSubsts: "++show sss++"\n"++
-           "  -> "++show ret++"\n")
+    --trace ("mergeSubsts: "++show sss++"\n"++
+    --       "  -> "++show ret++"\n")
           ret
 
 -- Unification
@@ -148,11 +153,18 @@ substTyEqs ss = map (substTyEq ss)
 unify :: [TyEq] -> KiEnv -> Either String (KiEnv, Subst)
 unify tyeqs kenv = 
   let ret = unify' tyeqs kenv M.empty M.empty in
-    trace ("unify: "++show tyeqs++"\n"++
+    trace ("Unify:\n"++showTyEqs tyeqs++
            "kenv: "++show kenv++"\n"++
-           "-> "++show ret++"\n")
+           "-> "++showRet ret++"\n")
           ret
   where
+    showTyEqs tyeqs = concatMap (\(a,b) -> "  - "++show a++"\n"++
+                                           "    "++show b++"\n") tyeqs
+    showRet :: Either String (KiEnv, Subst) -> String
+    showRet (Right (kenv', ss')) = "kenv': "++show kenv'++"\n"++
+                                   "   ss': "++show ss'++"\n"
+    showRet (Left msg) = msg
+
     unify' :: [TyEq] -> KiEnv -> Subst -> KiEnv ->
               Either String (KiEnv, Subst)
     unify' [] kenv subst senv = Right (kenv, subst)
@@ -218,7 +230,8 @@ unify tyeqs kenv =
                            (M.insert id1 ty2 $ substSubst ss subst)
                            (M.insert id1 (KiRecord fields1) $ substKiEnv ss senv)
 
-            _ -> Left "invalid kind"
+            Nothing -> Left $ "id1 not found: "++(show id1)
+            ret@_ -> Left $ "invalid kind: "++(show ret)
 
         (TyVar id1, TyVariant fields2) ->  --- (iv)
           undefined
@@ -244,11 +257,17 @@ unify tyeqs kenv =
 -- MonoTyの型変数のうち、kenvとenvに現れないものを多相にしたもの
 -- kenv, envは外側のプログラムの状況を表す
 -- そのため、これらに現れるTyVarは勝手に多相にしてはいけない
-typeClosure :: KiEnv -> TyEnv -> MonoTy -> (KiEnv, KindedTy)
-typeClosure kenv env ty =
-  let freeIds = (ftv ty \\ ftvKiEnv kenv) \\ (ftvEnv env) in
-  let newKenv = M.fromList $ map (\id -> (id, KiU)) freeIds in
-  (M.union kenv newKenv, (newKenv, ty))
+typeClosure :: KiEnv -> TyEnv -> MonoTy -> StateT Int (Either String) (KiEnv, KindedTy)
+typeClosure kenv env ty = do
+  let freeIds = (ftv ty \\ ftvKiEnv kenv) \\ (ftvEnv env)
+  (nids, ss) <- foldM (\(nids, ss') id1 -> do
+                        ty'@(TyVar id2) <- newTyVar
+                        return $ (id2:nids, M.insert id1 ty' ss'))
+                      ([], M.empty)
+                      freeIds
+  let newKenv = M.fromList $ map (\(k, v) -> (substVId ss k, substKind ss v)) 
+                                 (M.toList kenv)
+  return $ (newKenv, (newKenv, substMonoTy ss ty))
 
   -- 1.hsでは、(varIds ty)からenv内のtsのfreeTypeIdsを引いていた
   -- tsは(ids, ty)の組
@@ -267,8 +286,11 @@ infer'' :: KiEnv -> TyEnv -> Expr -> StateT Int (Either String) (KiEnv, Subst, M
 infer'' kenv env expr = do
   (kenv', ss, ty) <- infer' kenv env expr
   return $ trace ("infer: "++show expr++"\n"++
-                  "kenv,env: "++show (kenv, env)++"\n"++
-                  "ret: "++show (kenv', ss, ty)++"\n") $
+                  "kenv: "++show kenv++"\n"++
+                  "env:  "++show env++"\n"++
+                  "-> kenv': "++show kenv'++"\n"++
+                  "   ss: "++show ss++"\n"++
+                  "   ty: "++show ty++"\n") $
     (kenv', ss, ty)
 
 infer' :: KiEnv -> TyEnv -> Expr -> StateT Int (Either String) (KiEnv, Subst, MonoTy)
@@ -278,13 +300,14 @@ infer' kenv env (ELit prim) = do
 infer' kenv env (EVar name) =
   case M.lookup name env of
     Just (tykis, varTy) -> do
-      ss <- foldM (\ss' (id, ki) -> do
-                    ty' <- newTyVar
-                    return $ M.insert id ty' ss')
-                  M.empty
-                  (M.toList tykis)
-      let adds = map (\(id, ki) -> (id, substKind ss ki)) (M.toList tykis)
-      let newKenv = M.union kenv (M.fromList adds)
+      let tykis' = M.toList tykis
+      (nids, ss) <- foldM (\(nids, ss) (id, ki) -> do
+                            ty'@(TyVar nid) <- newTyVar
+                            return $ (nid:nids, M.insert id ty' ss))
+                          ([], M.empty)
+                          tykis'
+      let pairs = zip (reverse nids) $ map (substKind ss) (map snd tykis')
+      let newKenv = M.union kenv (M.fromList pairs)
       return (newKenv, M.empty, substMonoTy ss varTy)
     Nothing -> lift $ Left "infer': undefined variable"
 
@@ -313,9 +336,8 @@ infer' kenv env (ERecord pairs) = do
                   pairs
   let (kenv', _, ss', _) = head infers
   let labels = map fst pairs
-                                           -- ssを二重にかけているが大丈夫か？
   let elemTys = map (\(_, _, _, elemTy) -> substMonoTy ss' elemTy)
-                    (init infers) -- 最後のダミーを除く
+                    (reverse $ init infers) -- 最後のダミーを除く
   return (kenv', ss', TyRecord (M.fromList $ zip labels elemTys))
 
 infer' kenv env (ERecordRef recExpr label) = do
@@ -373,7 +395,7 @@ infer' kenv env (EVariant label valExpr) = do
 
 infer' kenv env (ELet name varExpr bodyExpr) = do
   (kenv1, ss1, varTy) <- infer'' kenv env varExpr
-  let (kenv1', ts1) = typeClosure kenv1 (substTyEnv ss1 env) varTy
+  (kenv1', ts1) <- typeClosure kenv1 (substTyEnv ss1 env) varTy
   let env' = M.insert name ts1 (substTyEnv ss1 env)
   (kenv2, ss2, bodyTy) <- infer'' kenv1' env' bodyExpr
   return (kenv2, mergeSubsts [ss2, ss1], bodyTy)
@@ -382,6 +404,8 @@ infer' kenv env (ELet name varExpr bodyExpr) = do
 
 p98 = PInt 98
 p99 = PInt 99
+bTrue = PBool True
+bFalse = PBool False
 
 main = hspec $ do
   describe "infer" $ do
@@ -398,14 +422,14 @@ main = hspec $ do
 --             M.empty,
 --             TyFun (TyVar 0) (TyVar 0))
 
-    it "abs, record ref" $ do
-      infer (EAbs "x" (ERecordRef (EVar "x") "a"))
-      `shouldBe`
-      Right (3,
-             M.fromList [(1, KiU),
-                         (2, KiRecord $ M.singleton "a" (TyVar 1))],
-             M.fromList [(0, TyVar 2)],
-             TyFun (TyVar 2) (TyVar 1))
+--    it "abs, record ref" $ do
+--      infer (EAbs "x" (ERecordRef (EVar "x") "a"))
+--      `shouldBe`
+--      Right (3,
+--             M.fromList [(1, KiU),
+--                         (2, KiRecord $ M.singleton "a" (TyVar 1))],
+--             M.fromList [(0, TyVar 2)],
+--             TyFun (TyVar 2) (TyVar 1))
 
 --    it "app" $ do
 --      infer (EApp (EAbs "x" $ EVar "x") (ELit p99))
@@ -429,6 +453,18 @@ main = hspec $ do
 --      Right (2, M.empty, M.empty,
 --             TyRecord $ M.singleton "x" (TyPrim p99))
 
---    it "let" $ do
+    it "let" $ do
+      let Right (_, _, _, ty) = infer (ELet "getX" (EAbs "o" (ERecordRef (EVar "o") "x"))
+                (ERecord [("a", EApp (EVar "getX")
+                                     (ERecord [("x", ELit p98),
+                                               ("y", ELit p99)])),
+                          ("b", EApp (EVar "getX")
+                                     (ERecord [("x", ELit bTrue),
+                                               ("z", ELit bFalse)]))]))
+
+      ty
+      `shouldBe`
+      (TyRecord $ M.fromList [("a", TyPrim p98), ("b", TyPrim bTrue)])
+
 --    it "variant" $ do
 --    it "case" $ do
